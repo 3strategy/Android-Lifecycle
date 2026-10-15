@@ -79,3 +79,85 @@ The fragment then supplies its own UI through `LifecycleFragment.onCreateView()`
 So the XML declaration is sufficient to specify and automatically add this fragment within the existing activity setup. The Java code is still necessary to host fragments and load/display the activity layout, but it does not need an additional `add()` or `attach()` transaction. The counter listeners, edge-to-edge setup, and window-inset listener do not select or add the fragment.
 
 If you removed `android:name`, you would need to add the fragment through code instead. That alternative should normally add it only on a fresh creation (`savedInstanceState == null`), allowing the manager to restore it on recreation. It is an alternative to this project's XML declaration, not an extra step required by the current code.
+
+### Question: Who calls onSaveInstanceState(), and how is the Bundle filled, saved, and delivered when the activity or fragment is recreated?
+
+#### Answer: Android requests a snapshot, your code fills it, and Android supplies it during restoration
+
+Android calls the activity's `onSaveInstanceState(Bundle outState)` through its lifecycle machinery. You override this callback to contribute your state; the button listeners do not call it. Android supplies `outState`, your method writes values into it, and Android retains the resulting saved state for possible recreation. See [saving activity instance state](https://developer.android.com/guide/components/activities/activity-lifecycle#save-simple-lightweight-ui-state-using-onsaveinstancestate).
+
+In [`MainActivity.java`](app/src/main/java/com/example/topics/MainActivity.java), the callback is:
+
+```java
+@Override
+protected void onSaveInstanceState(Bundle outState) {
+    outState.putInt(SAVED_COUNT, savedCount);
+    super.onSaveInstanceState(outState);
+}
+```
+
+`SAVED_COUNT` is the key `"saved_count"`. If `savedCount` is 2 when the callback runs, `putInt(...)` puts that number into the supplied bundle under that key. It does not save the activity object, the binding, or every field automatically.
+
+`super.onSaveInstanceState(outState)` lets the inherited Android/AndroidX implementation contribute framework state, including supported view state and fragment-manager state. It is part of completing the save operation, rather than calling your override again.
+
+For this project's Android versions (minimum API 31), a normal rotation that recreates the activity follows this activity callback sequence:
+
+```text
+Old MainActivity:
+    onPause()
+    onStop()
+    onSaveInstanceState(outState)   <-- copy savedCount into the snapshot
+    onDestroy()
+
+New MainActivity:
+    onCreate(savedInstanceState)   <-- read savedCount from the snapshot
+    onStart()
+    onRestoreInstanceState(...)    <-- inherited restoration; no override here
+    onResume()
+```
+
+For apps targeting API 28 or later, `onSaveInstanceState()` occurs after `onStop()` when it is invoked. Older targeting rules differ. This is a rotation example, not a promise that every pause, stop, or destruction invokes saving. See the [Activity callback reference](https://developer.android.com/reference/android/app/Activity#onSaveInstanceState(android.os.Bundle)).
+
+The new activity reads the saved value in this project's `onCreate()`:
+
+```java
+if (savedInstanceState != null) {
+    savedCount = savedInstanceState.getInt(SAVED_COUNT);
+}
+```
+
+`outState` means the outgoing snapshot being filled; `savedInstanceState` means the incoming saved state being read. These are parameter names, not two storage services. Restoration preserves the saved values; it does not require the exact same Java `Bundle` object to survive.
+
+That explains this project's rotation result after two increments: `memoryCount` starts at 0 in the new activity because the code never saves it, `savedCount` becomes 2 from the bundle, and `persistentCount` becomes 2 by reading `SharedPreferences`. `renderCounts()` then displays those fields.
+
+The fragment's snapshot is coordinated by AndroidX `FragmentManager` as part of saving the host activity. It calls the fragment's `onSaveInstanceState()` and includes that fragment's saved state within the manager's state. The activity and fragment receive their own state bundles; they do not share one flat collection of custom keys. See [saving state with fragments](https://developer.android.com/guide/fragments/saving-state#savedstate).
+
+In [`LifecycleFragment.java`](app/src/main/java/com/example/topics/LifecycleFragment.java), the fragment contributes its own counter:
+
+```java
+@Override
+public void onSaveInstanceState(@NonNull Bundle outState) {
+    outState.putInt(SAVED_COUNT, count);
+    super.onSaveInstanceState(outState);
+}
+```
+
+Here, `SAVED_COUNT` means `"fragment_count"`. On restoration, the manager supplies this fragment's saved bundle to its creation callbacks. This project reads the counter in `onViewCreated()`:
+
+```java
+if (savedInstanceState != null) {
+    count = savedInstanceState.getInt(SAVED_COUNT);
+}
+```
+
+The activity does not manually call the fragment's save method or forward its own bundle to the fragment. Also, the earlier detach/Back experiment can retain `count` in the surviving fragment object without needing a fresh saved-state callback just because its view was destroyed.
+
+The bundle is a small restoration snapshot, not a file your code writes or permanent app storage. Android keeps saved state outside the app process so it can restore a retained task after system-initiated process death. The snapshot must already have been collected; killing a process does not give the app a final opportunity to run this callback. Finishing the activity, force stopping, or dismissing the task is not a durable-storage use case. Use persistent storage for values that must survive those actions. See [saved state and persistence](https://developer.android.com/topic/libraries/architecture/saving-states).
+
+In this demo, the persistent counter is written separately on every increment:
+
+```java
+preferences.edit().putInt(PERSISTENT_COUNT, persistentCount).apply();
+```
+
+So there are two distinct triggers in the code: an increment changes the fields and requests a preferences write immediately; an Android save request copies the current `savedCount` and fragment `count` into restoration bundles later.
